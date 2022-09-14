@@ -2,12 +2,11 @@ use std::env;
 use std::fs;
 use std::char;
 use std::slice::Iter;
+use memmap2::Mmap;
 use crate::Frame::{StandardTextFrame, UserDefinedTextFrame, TableOfContentsFrame, ChapterFrame, SkipFrame};
 use crate::Encoding::{ISO_8859_1, UTF_16_BOM};
 
-
 // TODO: just read in id3 tag bytes, not whole file
-
 
 const FILE_LOCATION: &str = "./Antkind.mp3";
 
@@ -93,15 +92,15 @@ fn get_standard_32(big_endian: [u8; 4]) -> u32 {
      Description       <text string according to encoding> $00 (00)
      Value             <text string according to encoding>
 */
-fn user_defined_text_frame(offset: u32, id: String, bytes: &Vec<u8>) -> (u32, Frame) {
-    let encoding_byte = bytes[(offset+10) as usize];
+fn user_defined_text_frame(offset: u32, id: String, bytes: &Mmap) -> (u32, Frame) {
+    let encoding_byte = *bytes.get((offset+10) as usize).unwrap();
 
     let encoding = match encoding_byte {
         0 => ISO_8859_1,
         1 => UTF_16_BOM,
         _ => panic!("unhandled encoding byte"),
     };
-    // let groups: Vec<&[u8]> = bytes[(offset+5) as usize..].splitn(3, |n| *n == 0_u8).collect();
+    // let groups: Vec<&[u8]> = bytes.get((offset+5) as usize..).unwrap().splitn(3, |n| *n == 0_u8).collect();
     let mut encountered_stop = false;
     let mut reading_field = true;
     let mut i: usize = (offset+11) as usize;
@@ -114,14 +113,14 @@ fn user_defined_text_frame(offset: u32, id: String, bytes: &Vec<u8>) -> (u32, Fr
 
     if encoding == ISO_8859_1 {
         while !encountered_stop {
-            if bytes[i] == 0 && !reading_field {
+            if *bytes.get(i).unwrap() == 0 && !reading_field {
                 encountered_stop = true;
-            } else if bytes[i] == 0 {
+            } else if *bytes.get(i).unwrap() == 0 {
                 reading_field = false;
             } else if reading_field {
-                field_8.push(bytes[i]);
+                field_8.push(*bytes.get(i).unwrap());
             } else {
-                content_8.push(bytes[i]);
+                content_8.push(*bytes.get(i).unwrap());
             }
             i += 1;
         }
@@ -131,15 +130,15 @@ fn user_defined_text_frame(offset: u32, id: String, bytes: &Vec<u8>) -> (u32, Fr
         // TODO check bom
         i += 2;
         while !encountered_stop {
-            let is_null = (bytes[i] | bytes[i+1]) == 0;
+            let is_null = (*bytes.get(i).unwrap() | *bytes.get(i+1).unwrap()) == 0;
             if is_null && !reading_field {
                 encountered_stop = true;
             } else if is_null {
                 reading_field = false;
             } else if reading_field {
-                field_16.push(bytes[i] as u16 | ((bytes[i+1] as u16) << 8));
+                field_16.push(*bytes.get(i).unwrap() as u16 | ((*bytes.get(i+1).unwrap() as u16) << 8));
             } else {
-                content_16.push(bytes[i] as u16 | ((bytes[i+1] as u16) << 8));
+                content_16.push(*bytes.get(i).unwrap() as u16 | ((*bytes.get(i+1).unwrap() as u16) << 8));
             }
             i += 2;
         }
@@ -150,7 +149,7 @@ fn user_defined_text_frame(offset: u32, id: String, bytes: &Vec<u8>) -> (u32, Fr
     // FRAME SIZE
     let mut bsize: [u8; 4] = [0; 4];
     for i in (offset + 4)..=(offset + 7) {
-        bsize[(i - (offset+4)) as usize] = bytes[i as usize];
+        bsize[(i - (offset+4)) as usize] = *bytes.get(i as usize).unwrap();
     }
 
     let size = get_standard_32(bsize);
@@ -168,15 +167,15 @@ fn user_defined_text_frame(offset: u32, id: String, bytes: &Vec<u8>) -> (u32, Fr
     )
 }
 
-fn standard_text_frame(offset: u32, id: String, bytes: &Vec<u8>) -> (u32, Frame) {
+fn standard_text_frame(offset: u32, id: String, bytes: &Mmap) -> (u32, Frame) {
     let mut bsize: [u8; 4] = [0; 4];
     let mut flags: [u8; 2] = [0; 2];
     for i in (offset + 4)..=(offset + 7) {
-        bsize[(i - (offset+4)) as usize] = bytes[i as usize];
+        bsize[(i - (offset+4)) as usize] = *bytes.get(i as usize).unwrap();
     }
 
     for i in (offset + 8)..=(offset + 9) {
-        flags[(i - (offset+8)) as usize] = bytes[i as usize];
+        flags[(i - (offset+8)) as usize] = *bytes.get(i as usize).unwrap();
     }
 
     let size = get_standard_32(bsize);
@@ -190,7 +189,7 @@ fn standard_text_frame(offset: u32, id: String, bytes: &Vec<u8>) -> (u32, Frame)
 
     let mut content: Vec<u8> = Vec::new();
     for i in (offset + 10)..(offset + 10 + (size as u32)) {
-        content.push(bytes[i as usize]);
+        content.push(*bytes.get(i as usize).unwrap());
     }
 
     let new_offset = offset + 10 + (size as u32);
@@ -206,10 +205,10 @@ fn standard_text_frame(offset: u32, id: String, bytes: &Vec<u8>) -> (u32, Frame)
     )
 }
 
-fn skip_frame(init_offset: u32, id: String, bytes: &Vec<u8>) -> (u32, Frame) {
+fn skip_frame(init_offset: u32, id: String, bytes: &Mmap) -> (u32, Frame) {
     let mut bsize: [u8; 4] = [0; 4];
     for i in (init_offset + 4)..=(init_offset + 7) {
-        bsize[(i - (init_offset+4)) as usize] = bytes[i as usize];
+        bsize[(i - (init_offset+4)) as usize] = *bytes.get(i as usize).unwrap();
     }
 
     let size = get_standard_32(bsize);
@@ -257,16 +256,16 @@ fn is_table_of_contents_id(id: &str) -> bool {
     }
 }
 
-fn table_of_contents_frame(init_offset: u32, id: String, bytes: &Vec<u8>) -> (u32, Frame) {
+fn table_of_contents_frame(init_offset: u32, id: String, bytes: &Mmap) -> (u32, Frame) {
     let offset: usize = init_offset as usize;
     let mut bsize: [u8; 4] = [0; 4];
     let mut flags: [u8; 2] = [0; 2];
     for i in (offset + 4)..=(offset + 7) {
-        bsize[(i - (offset+4)) as usize] = bytes[i as usize];
+        bsize[(i - (offset+4)) as usize] = *bytes.get(i as usize).unwrap();
     }
 
     for i in (offset + 8)..=(offset + 9) {
-        flags[(i - (offset+8)) as usize] = bytes[i as usize];
+        flags[(i - (offset+8)) as usize] = *bytes.get(i as usize).unwrap();
     }
 
     let size = get_standard_32(bsize);
@@ -284,21 +283,21 @@ fn table_of_contents_frame(init_offset: u32, id: String, bytes: &Vec<u8>) -> (u3
     let mut elem_id_bytes: Vec<u8> = Vec::new();
     let mut id_terminated = false;
     while !id_terminated {
-        let byte = &bytes[offset];
-        if *byte == 0 {
+        let byte = &bytes.get(offset).unwrap();
+        if **byte == 0 {
             id_terminated = true;
         } else {
-            elem_id_bytes.push(bytes[offset]);
+            elem_id_bytes.push(*bytes.get(offset).unwrap());
         }
         offset += 1;
     }
 
     // CTOC FLAGS
-    let ctoc_flags = bytes[offset];
+    let ctoc_flags = *bytes.get(offset).unwrap();
     offset += 1;
 
     // ENTRY COUNT
-    let child_entries = bytes[offset];
+    let child_entries = *bytes.get(offset).unwrap();
     offset += 1;
 
     let mut children = Vec::with_capacity(child_entries as usize);
@@ -309,11 +308,11 @@ fn table_of_contents_frame(init_offset: u32, id: String, bytes: &Vec<u8>) -> (u3
             let mut child_terminated = false;
             let mut child_bytes: Vec<u8> = Vec::new();
             while !child_terminated {
-                let b = &bytes[offset];
-                if *b == 0 {
+                let b = &bytes.get(offset).unwrap();
+                if **b == 0 {
                     child_terminated = true;
                 } else {
-                    child_bytes.push(bytes[offset]);
+                    child_bytes.push(*bytes.get(offset).unwrap());
                 }
                 offset += 1;
             }
@@ -343,16 +342,16 @@ fn table_of_contents_frame(init_offset: u32, id: String, bytes: &Vec<u8>) -> (u3
     )
 }
 
-fn chapter_frame(init_offset: u32, id: String, bytes: &Vec<u8>) -> (u32, Frame) {
+fn chapter_frame(init_offset: u32, id: String, bytes: &Mmap) -> (u32, Frame) {
     let offset: usize = init_offset as usize;
     let mut bsize: [u8; 4] = [0; 4];
     let mut flags: [u8; 2] = [0; 2];
     for i in (offset + 4)..=(offset + 7) {
-        bsize[(i - (offset+4)) as usize] = bytes[i as usize];
+        bsize[(i - (offset+4)) as usize] = *bytes.get(i as usize).unwrap();
     }
 
     for i in (offset + 8)..=(offset + 9) {
-        flags[(i - (offset+8)) as usize] = bytes[i as usize];
+        flags[(i - (offset+8)) as usize] = *bytes.get(i as usize).unwrap();
     }
 
     let size = get_standard_32(bsize);
@@ -370,48 +369,48 @@ fn chapter_frame(init_offset: u32, id: String, bytes: &Vec<u8>) -> (u32, Frame) 
     let mut elem_id_bytes: Vec<u8> = Vec::new();
     let mut id_terminated = false;
     while !id_terminated {
-        let byte = &bytes[offset];
-        if *byte == 0 {
+        let byte = &bytes.get(offset).unwrap();
+        if **byte == 0 {
             id_terminated = true;
         } else {
-            elem_id_bytes.push(bytes[offset]);
+            elem_id_bytes.push(*bytes.get(offset).unwrap());
         }
         offset += 1;
     }
 
     // START TIME
     let millis_to_start: u32 = get_standard_32([
-        bytes[offset],
-        bytes[offset+1],
-        bytes[offset+2],
-        bytes[offset+3],
+        *bytes.get(offset).unwrap(),
+        *bytes.get(offset+1).unwrap(),
+        *bytes.get(offset+2).unwrap(),
+        *bytes.get(offset+3).unwrap(),
     ]);
     offset += 4;
 
     // END TIME
     let millis_to_end: u32 = get_standard_32([
-        bytes[offset],
-        bytes[offset+1],
-        bytes[offset+2],
-        bytes[offset+3],
+        *bytes.get(offset).unwrap(),
+        *bytes.get(offset+1).unwrap(),
+        *bytes.get(offset+2).unwrap(),
+        *bytes.get(offset+3).unwrap(),
     ]);
     offset += 4;
 
     // START OFFSET
     let start_byte_offset: u32 = get_standard_32([
-        bytes[offset],
-        bytes[offset+1],
-        bytes[offset+2],
-        bytes[offset+3],
+        *bytes.get(offset).unwrap(),
+        *bytes.get(offset+1).unwrap(),
+        *bytes.get(offset+2).unwrap(),
+        *bytes.get(offset+3).unwrap(),
     ]);
     offset += 4;
 
     // END OFFSET
     let trailing_byte_offset: u32 = get_standard_32([
-        bytes[offset],
-        bytes[offset+1],
-        bytes[offset+2],
-        bytes[offset+3],
+        *bytes.get(offset).unwrap(),
+        *bytes.get(offset+1).unwrap(),
+        *bytes.get(offset+2).unwrap(),
+        *bytes.get(offset+3).unwrap(),
     ]);
     offset += 4;
 
@@ -444,10 +443,10 @@ fn is_chap_frame(id: &str) -> bool {
 
 
 
-fn get_next_frame(offset: u32, bytes: &Vec<u8>) -> (u32, Frame) {
+fn get_next_frame(offset: u32, bytes: &Mmap) -> (u32, Frame) {
     let mut bid: [u8; 4] = [0; 4];
     for i in offset..=offset + 3 {
-        bid[(i - offset) as usize] = bytes[i as usize];
+        bid[(i - offset) as usize] = *bytes.get(i as usize).unwrap();
     }
     let id: String = bid.iter().map(|n| {
         let c = char::from(*n);
@@ -472,13 +471,13 @@ fn get_next_frame(offset: u32, bytes: &Vec<u8>) -> (u32, Frame) {
     }
 }
 
-fn print_bytes(offset: u32, bytes: &Vec<u8>, top: usize, bottom: usize) {
+fn print_bytes(offset: u32, bytes: &Mmap, top: usize, bottom: usize) {
     let offset = offset as usize;
     for i in offset-top..=offset+bottom {
         if i == offset {
-            println!("{i}: {:08b};\t{} <===============================", bytes[i as usize], char::from(bytes[i as usize]));
+            // println!("{i}: {:08b};\t{} <===============================", bytes.get(i as usize).unwrap(), char::from(bytes.get(i as usize).unwrap())); TODO: FIX
         } else {
-            println!("{i}: {:08b};\t{}", bytes[i as usize], char::from(bytes[i as usize]));
+            // println!("{i}: {:08b};\t{}", bytes.get(i as usize).unwrap(), char::from(bytes.get(i as usize).unwrap())); TODO: FIX
         }
     }
     println!("OFFSET: {offset}");
@@ -487,20 +486,20 @@ fn print_bytes(offset: u32, bytes: &Vec<u8>, top: usize, bottom: usize) {
 
 fn main() {
     let file_location = env::args().nth(1).expect("REQUIRES 1 ARGUMENT: MP3 FILE PATH");
-    dbg!(&file_location);
-    let bytes = fs::read(file_location)
+    let bytes = fs::File::open(file_location)
+        .and_then(|f| unsafe { Mmap::map(&f) } )
         .expect(&format!("couldn't find file {FILE_LOCATION}")[..]);
 
     let mut tag_name = Vec::new();
     for i in 0..=2 {
-        tag_name.push(bytes[i]);
+        tag_name.push(*bytes.get(i).unwrap());
     }
-    println!("TAG: {:?}", String::from_utf8(tag_name));
-    println!("VERSION: {}.{}", bytes[3], bytes[4]);
-    if bytes[3] != 3 || bytes[4] != 0 {
+    // println!("TAG: {:?}", String::from_utf8(tag_name)); TODO: fix
+    println!("VERSION: {}.{}", *bytes.get(3).unwrap(), *bytes.get(4).unwrap());
+    if *bytes.get(3).unwrap() != 3 || *bytes.get(4).unwrap() != 0 {
         panic!("THIS PROGRAM CURRENTLY ONLY HANDLES ID3V2.3.0");
     }
-    println!("TAG FLAGS: {:?}", bytes[5]);
+    println!("TAG FLAGS: {:?}", *bytes.get(5).unwrap());
 
     /*
     $49      44       33       yy       yy
@@ -510,7 +509,7 @@ fn main() {
     00000000 00000000 00011000 01101100 01001101
      */
 
-    let tag_size = get_synchsafe_32([bytes[6], bytes[7], bytes[8], bytes[9]]);
+    let tag_size = get_synchsafe_32([*bytes.get(6).unwrap(), *bytes.get(7).unwrap(), *bytes.get(8).unwrap(), *bytes.get(9).unwrap()]);
 
     println!("tag_size:\t{:#032b}", tag_size);
     println!("tag_size:\t{} bytes", tag_size);
